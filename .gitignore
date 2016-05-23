@@ -1,0 +1,11 @@
+*.local
+*.res
+*.identcache
+*.dsk
+*.tvsconfig
+*.dres
+*.stat
+*.otares
+*.dcu
+*.exe
+*.dproj
