@@ -14,7 +14,9 @@ type
     FRequires: TDictionary<string,string>;
     FRequiredBy: TStringList;
     function ExtractRequires(aSource: string): TArray<string>;
+    function GetFileName: string;
     function GetHasRequires: Boolean;
+    function GetIsPriority: Boolean;
     function GetRequiredBy: TArray<string>;
     function GetIsSourceFile: Boolean;
   public
@@ -24,9 +26,10 @@ type
     procedure RemoveRequire(aRequired: string);
     procedure ForEachRequire(Predicate: TFunc<string,Boolean>; DoAction:
         TProc<TPackage,string>);
-    property FileName: string read FFileName;
+    property FileName: string read GetFileName;
     property ID: string read FID;
     property IsDesign: Boolean read FIsDesign;
+    property IsPriority: Boolean read GetIsPriority;
     property IsSourceFile: Boolean read GetIsSourceFile;
     property HasRequires: Boolean read GetHasRequires;
     property RequiredBy: TArray<string> read GetRequiredBy;
@@ -131,13 +134,26 @@ begin
   end;
 end;
 
+function TPackage.GetFileName: string;
+begin
+  if IsPriority then
+    Result := FFileName.Remove(0, 1)
+  else
+    Result := FFileName;
+end;
+
+function TPackage.GetIsPriority: Boolean;
+begin
+  Result := FFileName.StartsWith('^');
+end;
+
 class function TDelphiDPKAnalyzer.ConstructBuildSequence(LibNames, Packages: TArray<string>):
     string;
 var A: TArray<string>;
     Libs: TDictionary<string,string>;
     DPKs: TDictionary<string,TPackage>;
     O: TPair<string,TPackage>;
-    PASs: TDictionary<string,TPackage>;
+    PrioPASs, PASs: TDictionary<string,TPackage>;
     P: TPackage;
     s: string;
     i, iCount, LastPackageCount: Integer;
@@ -147,6 +163,7 @@ var A: TArray<string>;
 begin
   Libs := TDictionary<string,string>.Create;
   DPKs := TDictionary<string,TPackage>.Create;
+  PrioPASs := TDictionary<string,TPackage>.Create;
   PASs := TDictionary<string,TPackage>.Create;
   RemoveLibs := TDictionary<string,TPackage>.Create;
   RequiredBys := TList<TPair<string,string>>.Create;
@@ -171,7 +188,10 @@ begin
         end
       );
       if P.IsSourceFile then
-        PASs.Add(P.FileName, P)
+        if P.IsPriority then
+          PrioPASs.Add(P.FileName, P)
+        else
+          PASs.Add(P.FileName, P)
       else
         DPKs.Add(P.ID, P);
     end;
@@ -182,6 +202,21 @@ begin
     end;
 
     iCount := 0;
+
+    if PrioPASs.Count > 0 then begin
+      Inc(iCount);
+
+      Outputs.Add(
+        Format('%d=%s',
+          [iCount,
+           string.Join(',', PrioPASs.Keys.ToArray).Replace('\', '/', [rfReplaceAll])
+          ]
+        )
+      );
+
+      for P in PrioPASs.Values do
+        P.Free;
+    end;
 
     if PASs.Count > 0 then begin
       Inc(iCount);
@@ -264,6 +299,7 @@ begin
   finally
     Libs.Free;
     DPKs.Free;
+    PrioPASs.Free;
     PASs.Free;
     RemoveLibs.Free;
     RequiredBys.Free;
