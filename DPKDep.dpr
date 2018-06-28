@@ -4,6 +4,7 @@ program DPKDep;
 
 uses
   System.SysUtils,
+  System.IOUtils,
   DPKAnalyzer in 'DPKAnalyzer.pas';
 
 procedure CheckParameters;
@@ -25,6 +26,8 @@ begin
   // Declare two variables to hold ParamStr(n) to avoid unexpected memory leak
   s := ParamStr(1);
   t := ParamStr(2);
+  if not TFile.Exists(t) or not TPath.GetExtension(t).ToLower.Equals('.dpk') then
+    t := TFile.ReadAllText(t, TEncoding.UTF8);
 
   WriteLn(TDelphiDPKAnalyzer.ConstructBuildSequence(s.Split([';']), t.Split([';'])));
 end.
