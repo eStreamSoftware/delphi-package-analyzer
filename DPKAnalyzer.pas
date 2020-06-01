@@ -3,7 +3,7 @@ unit DPKAnalyzer;
 interface
 
 uses
-  System.SysUtils, System.Classes, System.Generics.Collections;
+  System.Classes, System.Generics.Collections, System.SysUtils;
 
 type
   TPackage = class
@@ -13,14 +13,20 @@ type
     FFileName: string;
     FRequires: TDictionary<string,string>;
     FRequiredBy: TStringList;
-    function ExtractRequires(aSource: string): TArray<string>;
+    function ExtractRequires(aSource: string; aDefines: TArray<string> = nil):
+        TArray<string>;
     function GetFileName: string;
     function GetHasRequires: Boolean;
     function GetIsPriority: Boolean;
     function GetRequiredBy: TArray<string>;
     function GetIsSourceFile: Boolean;
+    function ParseDefines_ifdef(var aClause: string; aDefines: TArray<string> =
+        nil): Boolean;
+    function ParseDefines_else(aClause: string; aCondition: Boolean): string;
+    function ParseDefines_IsElse(aClause: string): Boolean;
+    function ParseDefines_IsNested(aClause: string): Boolean;
   public
-    constructor Create(aFileName: string);
+    constructor Create(aFileName: string; aDefines: TArray<string> = nil);
     procedure BeforeDestruction; override;
     procedure AddRequiredBy(aRequiredBy: string);
     procedure RemoveRequire(aRequired: string);
@@ -37,12 +43,14 @@ type
 
   TDelphiDPKAnalyzer = class abstract
   public
-    class function ConstructBuildSequence(LibNames, Packages: TArray<string>): string;
+    class function ConstructBuildSequence(LibNames, Packages: TArray<string>;
+        aDefines: TArray<string> = nil): string;
   end;
 
 implementation
 
-uses System.IOUtils, System.RegularExpressions;
+uses
+  System.IOUtils, System.RegularExpressions, System.StrUtils;
 
 procedure TPackage.AddRequiredBy(aRequiredBy: string);
 begin
@@ -56,7 +64,7 @@ begin
   FRequiredBy.Free;
 end;
 
-constructor TPackage.Create(aFileName: string);
+constructor TPackage.Create(aFileName: string; aDefines: TArray<string> = nil);
 var s, Source: string;
     A: TArray<string>;
 begin
@@ -66,7 +74,7 @@ begin
   FRequires := TDictionary<string,string>.Create;
   if TPath.GetExtension(FFileName).ToLower = '.dpk' then begin
     Source := TFile.ReadAllText(FFileName);
-    A := ExtractRequires(Source);
+    A := ExtractRequires(Source, aDefines);
     for s in A do begin
       if not FRequires.ContainsKey(s) then
         FRequires.Add(s, '');
@@ -78,19 +86,84 @@ begin
   FRequiredBy := TStringList.Create;
 end;
 
-function TPackage.ExtractRequires(aSource: string): TArray<string>;
+function TPackage.ParseDefines_IsNested(aClause: string): Boolean;
+begin
+  const re_defs = '(?isU){\$.+}';
+  var M := TRegEx.Match(aClause, re_defs);
+  var LastDefine := '';
+  while M.Success do begin
+    if SameText(LastDefine, M.Value) then
+      Exit(True);
+    LastDefine := M.Value;
+  end;
+
+  Result := False;
+end;
+
+function TPackage.ParseDefines_IsElse(aClause: string): Boolean;
+begin
+  const re_defs = '(?isU){\$.+}';
+  var M := TRegEx.Match(aClause, re_defs);
+  var A: TArray<string> := nil;
+  while M.Success do begin
+    A := A + [M.Value];
+    M := M.NextMatch;
+  end;
+  Result := (Length(A) = 1) and SameText(A[0], '{$else}');
+end;
+
+function TPackage.ParseDefines_else(aClause: string; aCondition: Boolean):
+    string;
+begin
+  const re_else = '(?is)([^{}]*)\{\$else\}([^{}]*)$';
+
+  var M := TRegEx.Match(aClause, re_else);
+  if M.Success then begin
+    if aCondition then
+      Result := M.Groups[1].Value
+    else
+      Result := M.Groups[2].Value;
+  end else
+    Result := aClause;
+end;
+
+function TPackage.ParseDefines_ifdef(var aClause: string; aDefines:
+    TArray<string> = nil): Boolean;
+begin
+  var Ungreedy := '';
+  if ParseDefines_IsNested(aClause) then Ungreedy := 'U';
+  const re_ifdef = Format('(?is%s)\{\$ifdef\s+([^{}]*)\}(.*)\{\$endif\}', [Ungreedy]);
+  var M := TRegEx.Match(aClause, re_ifdef);
+  var s: string;
+
+  Result := M.Success;
+  if M.Success then begin
+    aClause := aClause.Remove(M.Index - 1, M.Length);
+    if ParseDefines_IsElse(M.Groups[2].Value) then
+      s := ParseDefines_else(M.Groups[2].Value, MatchText(M.Groups[1].Value, aDefines))
+    else if MatchText(M.Groups[1].Value, aDefines) then
+      s := M.Groups[2].Value;
+    aClause.Insert(M.Index - 1, s);
+  end;
+end;
+
+function TPackage.ExtractRequires(aSource: string; aDefines: TArray<string> =
+    nil): TArray<string>;
 var s: string;
     M: TMatch;
 begin
   Result := TArray<string>.Create();
-  M := TRegEx.Match(aSource, '(?is)requires\s+(.*);\s+contains.*end.', [roSingleLine]);
+  M := TRegEx.Match(aSource, '(?is)requires\s+(.*)\s+contains.*end.');
   if M.Success then begin
-    s := TRegEx.Replace(M.Groups[1].Value, '(?is)\{\$ifdef.*\{\$endif\}', '', [roSingleLine]);
-    s := TRegEx.Replace(s, '(?is)\(\*.*\*\)', '', [roSingleLine]);
-    s := TRegEx.Replace(s, '(?is)\{.*\}', '', [roSingleLine]);
-    s := s.Replace(#13#10, '', [rfReplaceAll]);
+    s := M.Groups[1].Value;
+    while ParseDefines_ifdef(s, aDefines) do;
+    s := TRegEx.Replace(s, '(?isU)\(\*.*\*\)', '');
+    s := TRegEx.Replace(s, '(?isU)\{.*\}', '');
+    s := s.Replace(#13, '', [rfReplaceAll]);
+    s := s.Replace(#10, '', [rfReplaceAll]);
     s := s.Replace(' ', '', [rfReplaceAll]);
-    Result := s.ToLower.Split([',']);
+    if s.EndsWith(';') then s := s.Remove(s.Length - 1);
+    Result := s.ToLower.Split([','], TStringSplitOptions.ExcludeEmpty);
   end;
 end;
 
@@ -147,8 +220,8 @@ begin
   Result := FFileName.StartsWith('^');
 end;
 
-class function TDelphiDPKAnalyzer.ConstructBuildSequence(LibNames, Packages: TArray<string>):
-    string;
+class function TDelphiDPKAnalyzer.ConstructBuildSequence(LibNames, Packages:
+    TArray<string>; aDefines: TArray<string> = nil): string;
 var A: TArray<string>;
     Libs: TDictionary<string,string>;
     DPKs: TDictionary<string,TPackage>;
@@ -174,7 +247,7 @@ begin
         Libs.Add(s.ToLower, '');
 
     for s in Packages do begin
-      P := TPackage.Create(s);
+      P := TPackage.Create(s, aDefines);
       P.ForEachRequire(
         function (DCP: string): Boolean
         begin
